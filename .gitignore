@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.venv/
+.uv/
+
+# Cached models and tools
+.model_cache/
+YoutubeDownloader.win-x64/
+YoutubeDownloader.win-x64.zip
+
+# Audio & Video work files (Inputs, intermediate work, outputs)
+*.mp4
+*.wav
+*_dubwork/
+checkpoint.json

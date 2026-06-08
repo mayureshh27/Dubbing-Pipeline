@@ -1,0 +1,32 @@
+[project]
+name = "itmo-cpp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "faster-whisper",
+    "TTS",
+    "pydub",
+    "deep-translator",
+    "transformers<4.40.0",
+    "sentencepiece",
+    "torch",
+    "torchaudio",
+    "torchcodec",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+torchaudio = { index = "pytorch-cu126" }
+torchcodec = { index = "pytorch-cu126" }
+
+[tool.uv.extra-build-dependencies]
+pandas = ["setuptools"]
+
+
