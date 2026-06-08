@@ -1,7 +1,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
 from .config import PipelineConfig, Segment
 from .audio import check_ffmpeg, extract_audio, extract_full_audio, assemble_dubbed_track, mix_with_bgm, mux_to_video
 from .transcribe import transcribe
@@ -38,7 +38,7 @@ class ManifestManager:
             }
         }
 
-    def save(self, stage: str, status: str = "running", last_idx: int = 0, last_id: str = "", metrics: dict = None):
+    def save(self, stage: str, status: str = "running", last_idx: int = 0, last_id: str = "", metrics: Optional[dict] = None):
         manifest = self.load()
         manifest["state"]["stage"] = stage
         manifest["state"]["status"] = status
@@ -49,7 +49,7 @@ class ManifestManager:
         self.manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         log.info(f"Manifest updated: stage={stage}, status={status}")
 
-def save_artifact(name: str, segments: list[Segment], work_dir: Path):
+def save_artifact(name: str, segments: List[Segment], work_dir: Path):
     artifacts_dir = work_dir / "artifacts"
     artifacts_dir.mkdir(exist_ok=True)
     file_path = artifacts_dir / f"{name}.json"
@@ -60,7 +60,7 @@ def save_artifact(name: str, segments: list[Segment], work_dir: Path):
     file_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     log.info(f"Artifact saved: {file_path.name}")
 
-def load_artifact(name: str, work_dir: Path) -> Optional[list[Segment]]:
+def load_artifact(name: str, work_dir: Path) -> Optional[List[Segment]]:
     file_path = work_dir / "artifacts" / f"{name}.json"
     if not file_path.exists():
         return None

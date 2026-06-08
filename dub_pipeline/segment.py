@@ -1,5 +1,6 @@
 import re
 import logging
+from typing import List
 from .config import Segment
 from .transcribe import compute_segment_id
 
@@ -17,7 +18,7 @@ def is_code_heavy(text: str) -> bool:
         return True
     return False
 
-def split_segment_by_words(seg: Segment, max_words: int, max_duration: float) -> list[Segment]:
+def split_segment_by_words(seg: Segment, max_words: int, max_duration: float) -> List[Segment]:
     """Splits a single segment into smaller pieces at word level, prioritizing pauses."""
     if not seg.words or len(seg.words) <= max_words:
         return [seg]
@@ -70,7 +71,7 @@ def split_segment_by_words(seg: Segment, max_words: int, max_duration: float) ->
             
     return sub_segments
 
-def semantic_segmentation(raw_segments: list[Segment]) -> list[Segment]:
+def semantic_segmentation(raw_segments: List[Segment]) -> List[Segment]:
     log.info("Running code-aware semantic segmentation …")
     optimized = []
     

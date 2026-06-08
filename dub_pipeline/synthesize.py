@@ -1,10 +1,9 @@
 import logging
 import torch
 import gc
-import os
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Type
 from .config import PipelineConfig, Segment
 
 log = logging.getLogger("dub_pipeline.synthesize")
@@ -18,7 +17,7 @@ class BaseTTS:
     def __init__(self, cfg: PipelineConfig):
         self.cfg = cfg
 
-    def synthesize(self, text: str, output_path: str, ref_wav: str = None) -> float:
+    def synthesize(self, text: str, output_path: str, ref_wav: Optional[str] = None) -> float:
         """Synthesizes text to output_path and returns duration in seconds."""
         raise NotImplementedError
 
@@ -36,7 +35,7 @@ class XTTSProvider(BaseTTS):
             log.warning(f"XTTS initialization failed: {e}")
             self.available = False
 
-    def synthesize(self, text: str, output_path: str, ref_wav: str = None) -> float:
+    def synthesize(self, text: str, output_path: str, ref_wav: Optional[str] = None) -> float:
         if not self.available:
             raise RuntimeError("XTTS provider is not available.")
         
@@ -62,14 +61,14 @@ class KokoroProvider(BaseTTS):
         super().__init__(cfg)
         # Check if kokoro is available, else mark unavailable
         try:
-            import kokoro
+            import kokoro  # noqa: F401
             # We can initialize kokoro here
             self.available = True
         except ImportError:
             log.info("kokoro package not installed. KokoroProvider marked unavailable.")
             self.available = False
 
-    def synthesize(self, text: str, output_path: str, ref_wav: str = None) -> float:
+    def synthesize(self, text: str, output_path: str, ref_wav: Optional[str] = None) -> float:
         if not self.available:
             raise RuntimeError("Kokoro provider is not available.")
         # Perform Kokoro synthesis
@@ -88,13 +87,13 @@ class F5Provider(BaseTTS):
     def __init__(self, cfg: PipelineConfig):
         super().__init__(cfg)
         try:
-            import f5_tts
+            import f5_tts  # noqa: F401
             self.available = True
         except ImportError:
             log.info("f5_tts package not installed. F5Provider marked unavailable.")
             self.available = False
 
-    def synthesize(self, text: str, output_path: str, ref_wav: str = None) -> float:
+    def synthesize(self, text: str, output_path: str, ref_wav: Optional[str] = None) -> float:
         if not self.available:
             raise RuntimeError("F5-TTS provider is not available.")
         # Placeholder for F5-TTS inference
@@ -103,7 +102,7 @@ class F5Provider(BaseTTS):
         return 2.0
 
 # Registry pattern
-TTS_REGISTRY = {
+TTS_REGISTRY: Dict[str, Type[BaseTTS]] = {
     "xtts": XTTSProvider,
     "kokoro": KokoroProvider,
     "f5": F5Provider
@@ -124,7 +123,7 @@ def get_tts_provider(cfg: PipelineConfig) -> BaseTTS:
         
     return provider
 
-def synthesize_segments(segments: list[Segment], cfg: PipelineConfig, out_dir: Path) -> list[Segment]:
+def synthesize_segments(segments: List[Segment], cfg: PipelineConfig, out_dir: Path) -> List[Segment]:
     log.info(f"Synthesizing {len(segments)} segments …")
     
     tts_dir = out_dir / "tts_segments"
@@ -153,7 +152,7 @@ def synthesize_segments(segments: list[Segment], cfg: PipelineConfig, out_dir: P
         retries = 2
         for attempt in range(retries):
             try:
-                duration = provider.synthesize(text, out_wav, speaker_wav)
+                _ = provider.synthesize(text, out_wav, speaker_wav)
                 seg.tts_wav = out_wav
                 success = True
                 break

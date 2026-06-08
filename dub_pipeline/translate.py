@@ -4,6 +4,8 @@ import re
 import os
 import json
 import hashlib
+from pathlib import Path
+from typing import List
 from datetime import datetime
 import torch
 from .config import PipelineConfig, Segment
@@ -68,7 +70,7 @@ def apply_terminology_dictionary(text: str) -> str:
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
     return text
 
-def translate_segments(segments: list[Segment], cfg: PipelineConfig) -> list[Segment]:
+def translate_segments(segments: List[Segment], cfg: PipelineConfig) -> List[Segment]:
     log.info(f"Translating {len(segments)} segments (RU→EN) …")
     cache = load_cache()
     
@@ -130,7 +132,7 @@ def translate_segments(segments: list[Segment], cfg: PipelineConfig) -> list[Seg
 
     return segments
 
-def refine_segments_if_needed(segments: list[Segment]):
+def refine_segments_if_needed(segments: List[Segment]):
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         log.info("No GEMINI_API_KEY found. Skipping timing-based refinement step.")
@@ -185,7 +187,7 @@ def refine_segments_if_needed(segments: list[Segment]):
                 
         seg.text_refined = seg.text_en
 
-def _translate_marian(segments: list[Segment], cfg: PipelineConfig):
+def _translate_marian(segments: List[Segment], cfg: PipelineConfig):
     try:
         from transformers import MarianMTModel, MarianTokenizer
     except ImportError:
