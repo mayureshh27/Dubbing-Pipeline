@@ -1,4 +1,6 @@
 import logging
+import hashlib
+import re
 import torch
 import gc
 from pathlib import Path
@@ -6,6 +8,12 @@ from faster_whisper import WhisperModel
 from .config import PipelineConfig, Segment
 
 log = logging.getLogger("dub_pipeline.transcribe")
+
+def compute_segment_id(start: float, text: str) -> str:
+    normalized = re.sub(r'[^\w\s]', '', text.lower())
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    key = f"{start:.3f}_{normalized}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
 
 def transcribe(wav_path: Path, cfg: PipelineConfig) -> list[Segment]:
     log.info(f"Transcribing with {cfg.whisper_model} …")
@@ -41,7 +49,24 @@ def transcribe(wav_path: Path, cfg: PipelineConfig) -> list[Segment]:
     for seg in segments_raw:
         text = seg.text.strip()
         if text:
-            result.append(Segment(start=seg.start, end=seg.end, text_ru=text))
+            # Map word timestamps if present
+            words_list = []
+            if seg.words:
+                for w in seg.words:
+                    words_list.append({
+                        "word": w.word,
+                        "start": w.start,
+                        "end": w.end,
+                        "probability": w.probability
+                    })
+            seg_id = compute_segment_id(seg.start, text)
+            result.append(Segment(
+                id=seg_id,
+                start=seg.start,
+                end=seg.end,
+                text_ru=text,
+                words=words_list
+            ))
 
     log.info(f"→ Transcribed {len(result)} segments | language={info.language} (prob={info.language_probability:.2f})")
 
