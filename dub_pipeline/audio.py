@@ -23,6 +23,19 @@ def check_ffmpeg():
     if not shutil.which("ffmpeg"):
         raise EnvironmentError("ffmpeg not found on PATH. Please install ffmpeg.")
 
+def trim_leading_silence(input_wav: Path, output_wav: Path):
+    """Trims leading silence using FFmpeg silenceremove filter at -50dB threshold."""
+    cmd = [
+        "ffmpeg", "-y", "-i", str(input_wav),
+        "-af", "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0",
+        str(output_wav)
+    ]
+    try:
+        _run(cmd, silent=True)
+    except Exception as e:
+        log.warning(f"Silence trimming failed for {input_wav.name}: {e}. Falling back to copy.")
+        shutil.copy(input_wav, output_wav)
+
 def extract_audio(video_path: Path, out_dir: Path) -> Path:
     """Extract 16-kHz mono WAV from video (Whisper-ready)."""
     wav_path = out_dir / "source_audio.wav"
@@ -106,6 +119,8 @@ def assemble_dubbed_track(
     total_ms = len(source)
     dubbed = AudioSegment.silent(duration=total_ms)
 
+    current_playhead_ms = 0
+
     for i, seg in enumerate(segments):
         if i % 100 == 0 or i == len(segments) - 1:
             log.info(f"   … processed {i}/{len(segments)} segments")
@@ -131,6 +146,16 @@ def assemble_dubbed_track(
         seg_end_ms = int(seg.end * 1000)
         slot_ms = seg_end_ms - seg_start_ms
         
+        # Educational timeline gap compression
+        if cfg.tts_provider == "kokoro":
+            gap_ms = seg_start_ms - current_playhead_ms
+            if gap_ms > 400:
+                target_start_ms = current_playhead_ms + 200
+            else:
+                target_start_ms = max(seg_start_ms, current_playhead_ms)
+        else:
+            target_start_ms = seg_start_ms
+
         # Time-stretch alignment & Unsafe Ratio Guardrails
         if cfg.stretch_audio and len(tts_audio) > 0:
             ratio = len(tts_audio) / max(slot_ms, 1)
@@ -145,11 +170,13 @@ def assemble_dubbed_track(
                 speed_factor = min(ratio, 2.0)
                 tts_audio = speedup(tts_audio, playback_speed=speed_factor, chunk_size=50)
             elif ratio < 0.90:
-                pad_ms = slot_ms - len(tts_audio)
-                tts_audio = tts_audio + AudioSegment.silent(duration=pad_ms)
+                if cfg.tts_provider != "kokoro":
+                    pad_ms = slot_ms - len(tts_audio)
+                    tts_audio = tts_audio + AudioSegment.silent(duration=pad_ms)
 
         # Overlay at correct position
-        dubbed = dubbed.overlay(tts_audio, position=seg_start_ms)
+        dubbed = dubbed.overlay(tts_audio, position=target_start_ms)
+        current_playhead_ms = target_start_ms + len(tts_audio)
 
     raw_track = out_dir / "dubbed_track_raw.wav"
     dubbed.export(str(raw_track), format="wav")
@@ -171,13 +198,16 @@ def mix_with_bgm(
     log.info("Mixing dubbed track using dynamic sidechain compression ducking …")
     mixed_path = out_dir / "mixed_audio.wav"
     
-    # dynamic ducking: use sidechaincompress filter
-    # dubbed_track is input 1 (compressor sidechain key), original_audio is input 0 (ambient background track)
+    # dynamic ducking: use sidechaincompress filter, then amix both inputs, and apply a hard limiter
+    filter_complex = (
+        "[0:a][1:a]sidechaincompress=threshold=0.10:ratio=5:attack=5:release=120[ducked]; "
+        "[ducked][1:a]amix=inputs=2:duration=first,alimiter=limit=0.95[mixed]"
+    )
     cmd = [
         "ffmpeg", "-y",
         "-i", str(original_audio),
         "-i", str(dubbed_track),
-        "-filter_complex", "[0:a][1:a]sidechaincompress=threshold=0.10:ratio=5:attack=15:release=250[mixed]",
+        "-filter_complex", filter_complex,
         "-map", "[mixed]",
         str(mixed_path)
     ]
@@ -189,7 +219,8 @@ def mix_with_bgm(
             "ffmpeg", "-y",
             "-i", str(original_audio),
             "-i", str(dubbed_track),
-            "-filter_complex", "amix=inputs=2:duration=first",
+            "-filter_complex", "amix=inputs=2:duration=first,alimiter=limit=0.95[mixed]",
+            "-map", "[mixed]",
             str(mixed_path)
         ]
         _run(cmd_fallback, silent=True)

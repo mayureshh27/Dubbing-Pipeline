@@ -61,6 +61,7 @@ class PipelineConfig:
     speaker_wav: Optional[str] = None
     xtts_language: str = "en"
     xtts_speed: float = 1.0
+    tts_speed: Optional[float] = None
 
     # Timing
     stretch_audio: bool = True
@@ -96,3 +97,39 @@ class PipelineConfig:
             self.tts_provider = "f5"
         elif self.profile == "high_quality":
             self.tts_provider = "xtts"
+
+        if self.tts_speed is None:
+            if self.tts_provider == "kokoro":
+                self.tts_speed = 1.15
+            else:
+                self.tts_speed = self.xtts_speed
+
+    def get_tts_profile(self) -> dict:
+        return TTS_PROFILES.get(self.tts_provider, TTS_PROFILES["xtts"])
+
+TTS_PROFILES = {
+    "kokoro": {
+        "max_words": 12,
+        "max_duration": 4.5,
+        "pause_threshold": 0.3,
+        "compress_pauses": True,
+        "trim_silence": True,
+        "stretch_limit": 1.1,
+    },
+    "xtts": {
+        "max_words": 18,
+        "max_duration": 7.0,
+        "pause_threshold": 0.45,
+        "compress_pauses": False,
+        "trim_silence": True,
+        "stretch_limit": 1.15,
+    },
+    "f5": {
+        "max_words": 28,
+        "max_duration": 10.0,
+        "pause_threshold": 0.6,
+        "compress_pauses": False,
+        "trim_silence": False,
+        "stretch_limit": 1.2,
+    }
+}

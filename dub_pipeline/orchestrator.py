@@ -147,7 +147,7 @@ def process_file(input_path: Path, output_path: Optional[Path], cfg: PipelineCon
         log.info("[3/8] Running semantic segmentation …")
         if not segments:
             segments = load_artifact("transcript", work_dir) or []
-        segments = semantic_segmentation(segments)
+        segments = semantic_segmentation(segments, cfg)
         save_artifact("segmented", segments, work_dir)
         current_stage = "translate"
         mm.save(current_stage, "completed")

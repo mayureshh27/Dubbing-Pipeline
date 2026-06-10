@@ -44,7 +44,7 @@ class XTTSProvider(BaseTTS):
             file_path=output_path,
             speaker_wav=speaker,
             language=self.cfg.xtts_language,
-            speed=self.cfg.xtts_speed
+            speed=self.cfg.tts_speed
         )
         # Determine duration
         import torchaudio
@@ -71,7 +71,7 @@ class KokoroProvider(BaseTTS):
             raise RuntimeError("Kokoro provider is not available.")
         import soundfile as sf
         import numpy as np
-        generator = self.pipeline(text, voice="af_heart", speed=self.cfg.xtts_speed, split_pattern=None)
+        generator = self.pipeline(text, voice="af_sky", speed=self.cfg.tts_speed, split_pattern=None)
         audio_segments = []
         for gs, ps, audio in generator:
             if audio is not None and len(audio) > 0:
@@ -111,7 +111,7 @@ class F5Provider(BaseTTS):
             ref_file=ref_file,
             ref_text=ref_text,
             gen_text=text,
-            speed=self.cfg.xtts_speed,
+            speed=self.cfg.tts_speed,
             file_wave=output_path
         )
         
@@ -127,12 +127,7 @@ TTS_REGISTRY: Dict[str, Type[BaseTTS]] = {
 }
 
 def get_tts_provider(cfg: PipelineConfig) -> BaseTTS:
-    provider_class = TTS_REGISTRY.get(cfg.xtts_model.split("/")[0], XTTSProvider)
-    # Check if user requested a specific provider name
-    requested = getattr(cfg, "tts_provider", "xtts")
-    if requested in TTS_REGISTRY:
-        provider_class = TTS_REGISTRY[requested]
-    
+    provider_class = TTS_REGISTRY.get(cfg.tts_provider, XTTSProvider)
     log.info(f"Selected TTS Provider: {provider_class.name}")
     provider = provider_class(cfg)
     if not provider.available:
@@ -154,6 +149,8 @@ def synthesize_segments(segments: List[Segment], cfg: PipelineConfig, out_dir: P
     if not speaker_wav:
         speaker_wav = str(out_dir / "speaker_ref.wav")
 
+    from .audio import trim_leading_silence
+
     for i, seg in enumerate(segments):
         # Deterministic Segment filename using segment.id
         out_wav = str(tts_dir / f"seg_{seg.id}.wav")
@@ -165,10 +162,18 @@ def synthesize_segments(segments: List[Segment], cfg: PipelineConfig, out_dir: P
         if not text:
             continue
 
+        success = False
+
         # Retry logic & timeout watchdog
         # Attempt 1: Standard synthesis
         try:
-            _ = provider.synthesize(text, out_wav, speaker_wav)
+            temp_wav = out_wav + ".raw"
+            _ = provider.synthesize(text, temp_wav, speaker_wav)
+            trim_leading_silence(Path(temp_wav), Path(out_wav))
+            try:
+                Path(temp_wav).unlink()
+            except Exception:
+                pass
             seg.tts_wav = out_wav
             success = True
         except Exception as e:
@@ -185,13 +190,24 @@ def synthesize_segments(segments: List[Segment], cfg: PipelineConfig, out_dir: P
                     sub_wavs = []
                     for idx, sent in enumerate(sentences):
                         sub_out_wav = str(tts_dir / f"seg_{seg.id}_sub_{idx}.wav")
-                        provider.synthesize(sent, sub_out_wav, speaker_wav)
+                        sub_temp_wav = sub_out_wav + ".raw"
+                        provider.synthesize(sent, sub_temp_wav, speaker_wav)
+                        trim_leading_silence(Path(sub_temp_wav), Path(sub_out_wav))
+                        try:
+                            Path(sub_temp_wav).unlink()
+                        except Exception:
+                            pass
                         sub_wavs.append(sub_out_wav)
                     
-                    # Merge audio
-                    combined = AudioSegment.empty()
+                    # Merge audio with crossfade to avoid clicks
+                    combined = None
                     for sw in sub_wavs:
-                        combined += AudioSegment.from_wav(sw)
+                        segment_audio = AudioSegment.from_wav(sw)
+                        if combined is None:
+                            combined = segment_audio
+                        else:
+                            combined = combined.append(segment_audio, crossfade=10)
+                    
                     combined.export(out_wav, format="wav")
                     seg.tts_wav = out_wav
                     success = True
@@ -207,7 +223,13 @@ def synthesize_segments(segments: List[Segment], cfg: PipelineConfig, out_dir: P
             try:
                 kokoro_provider = KokoroProvider(cfg)
                 if kokoro_provider.available:
-                    kokoro_provider.synthesize(text, out_wav, speaker_wav)
+                    temp_wav = out_wav + ".raw"
+                    kokoro_provider.synthesize(text, temp_wav, speaker_wav)
+                    trim_leading_silence(Path(temp_wav), Path(out_wav))
+                    try:
+                        Path(temp_wav).unlink()
+                    except Exception:
+                        pass
                     seg.tts_wav = out_wav
                     success = True
                     log.info(f"Successfully synthesized segment {seg.id} using Kokoro fallback")

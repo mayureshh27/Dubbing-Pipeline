@@ -18,7 +18,7 @@ def is_code_heavy(text: str) -> bool:
         return True
     return False
 
-def split_segment_by_words(seg: Segment, max_words: int, max_duration: float) -> List[Segment]:
+def split_segment_by_words(seg: Segment, max_words: int, max_duration: float, pause_threshold: float = 0.4) -> List[Segment]:
     """Splits a single segment into smaller pieces at word level, prioritizing pauses."""
     if not seg.words:
         words = seg.text_ru.split()
@@ -64,7 +64,7 @@ def split_segment_by_words(seg: Segment, max_words: int, max_duration: float) ->
         has_pause = False
         if i < len(seg.words) - 1:
             pause_len = seg.words[i + 1]["start"] - w["end"]
-            if pause_len > 0.4:  # significant pause
+            if pause_len > pause_threshold:  # significant pause
                 has_pause = True
         
         # Split conditions
@@ -98,9 +98,21 @@ def split_segment_by_words(seg: Segment, max_words: int, max_duration: float) ->
             
     return sub_segments
 
-def semantic_segmentation(raw_segments: List[Segment]) -> List[Segment]:
+
+def semantic_segmentation(raw_segments: List[Segment], cfg = None) -> List[Segment]:
     log.info("Running code-aware semantic segmentation …")
     optimized = []
+    
+    # Resolve profile-specific boundaries
+    if cfg is not None:
+        profile = cfg.get_tts_profile()
+        max_words_limit = profile["max_words"]
+        max_duration_limit = profile["max_duration"]
+        pause_threshold = profile["pause_threshold"]
+    else:
+        max_words_limit = 18
+        max_duration_limit = 7.0
+        pause_threshold = 0.4
     
     for seg in raw_segments:
         # Code indicator check
@@ -108,13 +120,13 @@ def semantic_segmentation(raw_segments: List[Segment]) -> List[Segment]:
         
         # Standard limits vs strict code limits
         if code_heavy:
-            max_words = 15
-            max_duration = 6.0
+            max_words = min(15, max_words_limit)
+            max_duration = min(6.0, max_duration_limit)
         else:
-            max_words = 28
-            max_duration = 10.0
+            max_words = max_words_limit
+            max_duration = max_duration_limit
             
-        sub_segs = split_segment_by_words(seg, max_words, max_duration)
+        sub_segs = split_segment_by_words(seg, max_words, max_duration, pause_threshold)
         optimized.extend(sub_segs)
         
     log.info(f"→ Resegmented {len(raw_segments)} raw segments into {len(optimized)} semantic segments")
