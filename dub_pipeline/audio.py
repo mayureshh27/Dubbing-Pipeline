@@ -65,18 +65,22 @@ def two_pass_loudnorm(input_wav: Path, output_wav: Path):
         
         stats = json.loads(json_match.group(0))
         
-        # Pass 2: Apply
+        # Pass 2: Apply EQ, Compand, and Loudnorm
+        filter_str = (
+            "highpass=f=80,"
+            "equalizer=f=3000:width_type=q:width=1.0:g=1.5,"
+            "compand=attacks=0.03:decays=0.3:points=-80/-80|-20/-20|-15/-10|0/-3:soft-shelf=6,"
+            f"loudnorm=linear=true:"
+            f"I_measured={stats['input_i']}:"
+            f"LRA_measured={stats['input_lra']}:"
+            f"TP_measured={stats['input_tp']}:"
+            f"threshold_measured={stats['input_thresh']}:"
+            f"offset_measured={stats['target_offset']}:"
+            f"I=-16:LRA=11:TP=-1.5"
+        )
         cmd_apply = [
             "ffmpeg", "-y", "-i", str(input_wav),
-            "-af", (
-                f"loudnorm=linear=true:"
-                f"I_measured={stats['input_i']}:"
-                f"LRA_measured={stats['input_lra']}:"
-                f"TP_measured={stats['input_tp']}:"
-                f"threshold_measured={stats['input_thresh']}:"
-                f"offset_measured={stats['target_offset']}:"
-                f"I=-16:LRA=11:TP=-1.5"
-            ),
+            "-af", filter_str,
             "-ar", "44100",
             str(output_wav)
         ]
@@ -103,17 +107,40 @@ def assemble_dubbed_track(
     dubbed = AudioSegment.silent(duration=total_ms)
 
     for i, seg in enumerate(segments):
+        if i % 100 == 0 or i == len(segments) - 1:
+            log.info(f"   … processed {i}/{len(segments)} segments")
         if not seg.tts_wav or not Path(seg.tts_wav).exists():
             continue
 
         tts_audio = AudioSegment.from_wav(seg.tts_wav)
+        
+        # Audio Quality Validation
+        dur_sec = len(tts_audio) / 1000.0
+        if dur_sec <= 0:
+            log.warning(f"Segment {seg.id} generated empty audio. Skipping.")
+            continue
+        if tts_audio.rms < 100:
+            log.warning(f"Segment {seg.id} generated silent audio (RMS {tts_audio.rms} < 100). Skipping.")
+            continue
+        if tts_audio.max >= 32767:
+            log.warning(f"Segment {seg.id} audio is clipping (max amplitude {tts_audio.max} >= 32767).")
+        if tts_audio.frame_rate not in [16000, 22050, 24000, 44100, 48000]:
+            log.warning(f"Segment {seg.id} has unusual sample rate ({tts_audio.frame_rate} Hz).")
+
         seg_start_ms = int(seg.start * 1000)
         seg_end_ms = int(seg.end * 1000)
         slot_ms = seg_end_ms - seg_start_ms
         
-        # Time-stretch alignment
+        # Time-stretch alignment & Unsafe Ratio Guardrails
         if cfg.stretch_audio and len(tts_audio) > 0:
             ratio = len(tts_audio) / max(slot_ms, 1)
+            
+            if ratio > 1.35:
+                log.warning(f"Segment {seg.id} has unsafe stretch ratio ({ratio:.2f} > 1.35). Skipping to avoid severe distortion.")
+                continue
+            elif ratio > 1.2:
+                log.info(f"Segment {seg.id} stretch ratio ({ratio:.2f}) requires high speedup. Proceeding with caution.")
+                
             if ratio > 1.10:
                 speed_factor = min(ratio, 2.0)
                 tts_audio = speedup(tts_audio, playback_speed=speed_factor, chunk_size=50)

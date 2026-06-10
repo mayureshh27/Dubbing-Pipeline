@@ -20,7 +20,34 @@ def is_code_heavy(text: str) -> bool:
 
 def split_segment_by_words(seg: Segment, max_words: int, max_duration: float) -> List[Segment]:
     """Splits a single segment into smaller pieces at word level, prioritizing pauses."""
-    if not seg.words or len(seg.words) <= max_words:
+    if not seg.words:
+        words = seg.text_ru.split()
+        if len(words) <= max_words:
+            return [seg]
+        num_words = len(words)
+        duration = seg.end - seg.start
+        estimated_words = []
+        current_time = seg.start
+        word_dur = duration / num_words if num_words > 0 else 0.0
+        for w in words:
+            estimated_words.append({
+                "word": w + " ",
+                "start": current_time,
+                "end": current_time + word_dur,
+                "probability": 1.0
+            })
+            current_time += word_dur
+        seg = Segment(
+            id=seg.id,
+            start=seg.start,
+            end=seg.end,
+            text_ru=seg.text_ru,
+            words=estimated_words,
+            speech_rate=seg.speech_rate,
+            pause_density=seg.pause_density
+        )
+
+    if len(seg.words) <= max_words:
         return [seg]
 
     sub_segments = []

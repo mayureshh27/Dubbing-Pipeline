@@ -14,6 +14,10 @@ dependencies = [
     "torch",
     "torchaudio",
     "torchcodec",
+    "kokoro",
+    "soundfile",
+    "f5-tts",
+    "llama-cpp-python",
 ]
 
 [[tool.uv.index]]

@@ -12,6 +12,8 @@ class Segment:
     text_refined: str = ""
     tts_wav: Optional[str] = None
     words: List[dict] = field(default_factory=list)
+    speech_rate: float = 0.0
+    pause_density: float = 0.0
 
     def to_dict(self):
         return {
@@ -22,7 +24,9 @@ class Segment:
           "en": self.text_en,
           "refined": self.text_refined,
           "tts_wav": self.tts_wav,
-          "words": self.words
+          "words": self.words,
+          "speech_rate": self.speech_rate,
+          "pause_density": self.pause_density
         }
 
     @classmethod
@@ -35,7 +39,9 @@ class Segment:
           text_en=data.get("en", ""),
           text_refined=data.get("refined", ""),
           tts_wav=data.get("tts_wav"),
-          words=data.get("words", [])
+          words=data.get("words", []),
+          speech_rate=data.get("speech_rate", 0.0),
+          pause_density=data.get("pause_density", 0.0)
         )
 
 @dataclass
@@ -65,6 +71,11 @@ class PipelineConfig:
     bgm_volume_db: float = -18.0
     output_suffix: str = "_en_dubbed"
 
+    # Profile & Fallbacks
+    profile: str = "fast"  # fast, high_quality, educational, authentic
+    qwen_model_path: str = "models/qwen/Qwen2.5-3B-Instruct-Q4_K_M.gguf"
+    translategemma_model_path: str = "models/translategemma/translategemma-4b-it.Q4_K_M.gguf"
+
     # Misc
     device: str = field(init=False)
 
@@ -75,3 +86,13 @@ class PipelineConfig:
             self.device = self.whisper_device
         if self.device == "cpu":
             self.whisper_compute_type = "int8"
+
+        # Profile defaults mapping
+        if self.profile == "fast":
+            self.tts_provider = "kokoro"
+        elif self.profile == "educational":
+            self.tts_provider = "kokoro"
+        elif self.profile == "authentic":
+            self.tts_provider = "f5"
+        elif self.profile == "high_quality":
+            self.tts_provider = "xtts"

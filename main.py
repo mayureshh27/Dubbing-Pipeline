@@ -11,8 +11,8 @@ def new_load(*args, **kwargs):
     return orig_load(*args, **kwargs)
 torch.load = new_load
 
-from dub_pipeline.config import PipelineConfig
-from dub_pipeline.orchestrator import process_file, process_batch
+from dub_pipeline.config import PipelineConfig  # noqa: E402
+from dub_pipeline.orchestrator import process_file, process_batch  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,8 +37,12 @@ def main():
     parser.add_argument("--no_bgm", action="store_true", help="Replace audio entirely (no BGM mix)")
     parser.add_argument("--no_stretch", action="store_true", help="Disable time-stretch alignment")
     parser.add_argument("--xtts_speed", type=float, default=1.0, help="XTTS speed factor (0.8–1.4)")
-    parser.add_argument("--translation", choices=["marian", "deep_translator"], default="marian")
+    parser.add_argument("--translation", choices=["marian", "deep_translator", "qwen", "translategemma"], default="marian")
     parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
+    parser.add_argument("--profile", choices=["fast", "high_quality", "educational", "authentic"], default="fast", help="Settings profile")
+    parser.add_argument("--tts_provider", choices=["xtts", "kokoro", "f5"], default=None, help="TTS synthesis engine")
+    parser.add_argument("--qwen_path", type=str, default="models/qwen/Qwen2.5-3B-Instruct-Q4_K_M.gguf", help="Path to local Qwen GGUF model")
+    parser.add_argument("--translategemma_path", type=str, default="models/translategemma/translategemma-4b-it.Q4_K_M.gguf", help="Path to local TranslateGemma GGUF model")
 
     args = parser.parse_args()
 
@@ -50,6 +54,10 @@ def main():
         stretch_audio=not args.no_stretch,
         xtts_speed=args.xtts_speed,
         translation_backend=args.translation,
+        profile=args.profile,
+        tts_provider=args.tts_provider,
+        qwen_model_path=args.qwen_path,
+        translategemma_model_path=args.translategemma_path,
     )
 
     if args.batch:

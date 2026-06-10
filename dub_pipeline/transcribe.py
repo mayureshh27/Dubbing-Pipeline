@@ -59,13 +59,32 @@ def transcribe(wav_path: Path, cfg: PipelineConfig) -> list[Segment]:
                         "end": w.end,
                         "probability": w.probability
                     })
+            # Calculate speech rate and pause density
+            duration = seg.end - seg.start
+            speech_rate = 0.0
+            pause_density = 0.0
+            if duration > 0:
+                words_count = len(words_list) if words_list else len(text.split())
+                speech_rate = (words_count / duration) * 60
+                if words_list:
+                    gaps = 0.0
+                    gaps += max(0.0, words_list[0]["start"] - seg.start)
+                    for idx in range(1, len(words_list)):
+                        gap = words_list[idx]["start"] - words_list[idx - 1]["end"]
+                        if gap > 0:
+                            gaps += gap
+                    gaps += max(0.0, seg.end - words_list[-1]["end"])
+                    pause_density = min(1.0, gaps / duration)
+
             seg_id = compute_segment_id(seg.start, text)
             result.append(Segment(
                 id=seg_id,
                 start=seg.start,
                 end=seg.end,
                 text_ru=text,
-                words=words_list
+                words=words_list,
+                speech_rate=speech_rate,
+                pause_density=pause_density
             ))
 
     log.info(f"→ Transcribed {len(result)} segments | language={info.language} (prob={info.language_probability:.2f})")

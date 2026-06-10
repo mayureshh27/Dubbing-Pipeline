@@ -21,3 +21,6 @@ YoutubeDownloader.win-x64.zip
 *.wav
 *_dubwork/
 checkpoint.json
+models/
+artifacts/
+*.srt

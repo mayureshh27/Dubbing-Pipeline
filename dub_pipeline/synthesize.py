@@ -1,7 +1,6 @@
 import logging
 import torch
 import gc
-import time
 from pathlib import Path
 from typing import Optional, List, Dict, Type
 from .config import PipelineConfig, Segment
@@ -59,25 +58,29 @@ class KokoroProvider(BaseTTS):
 
     def __init__(self, cfg: PipelineConfig):
         super().__init__(cfg)
-        # Check if kokoro is available, else mark unavailable
         try:
-            import kokoro  # noqa: F401
-            # We can initialize kokoro here
+            from kokoro import KPipeline
+            self.pipeline = KPipeline(lang_code='a', device=cfg.device)
             self.available = True
-        except ImportError:
-            log.info("kokoro package not installed. KokoroProvider marked unavailable.")
+        except Exception as e:
+            log.warning(f"Kokoro initialization failed: {e}")
             self.available = False
 
     def synthesize(self, text: str, output_path: str, ref_wav: Optional[str] = None) -> float:
         if not self.available:
             raise RuntimeError("Kokoro provider is not available.")
-        # Perform Kokoro synthesis
-        import kokoro
         import soundfile as sf
-        # Generate audio
-        audio, out_sr = kokoro.generate(text, voice="af_heart", speed=self.cfg.xtts_speed)
-        sf.write(output_path, audio, out_sr)
-        return len(audio) / out_sr
+        import numpy as np
+        generator = self.pipeline(text, voice="af_heart", speed=self.cfg.xtts_speed, split_pattern=None)
+        audio_segments = []
+        for gs, ps, audio in generator:
+            if audio is not None and len(audio) > 0:
+                audio_segments.append(audio)
+        if not audio_segments:
+            raise RuntimeError("Kokoro generated no audio.")
+        combined_audio = np.concatenate(audio_segments)
+        sf.write(output_path, combined_audio, 24000)
+        return len(combined_audio) / 24000
 
 class F5Provider(BaseTTS):
     name: str = "f5"
@@ -87,19 +90,34 @@ class F5Provider(BaseTTS):
     def __init__(self, cfg: PipelineConfig):
         super().__init__(cfg)
         try:
-            import f5_tts  # noqa: F401
+            from f5_tts.api import F5TTS
+            self.model = F5TTS(device=cfg.device, hf_cache_dir="./.model_cache")
             self.available = True
-        except ImportError:
-            log.info("f5_tts package not installed. F5Provider marked unavailable.")
+        except Exception as e:
+            log.warning(f"F5-TTS initialization failed: {e}")
             self.available = False
 
     def synthesize(self, text: str, output_path: str, ref_wav: Optional[str] = None) -> float:
         if not self.available:
             raise RuntimeError("F5-TTS provider is not available.")
-        # Placeholder for F5-TTS inference
-        # In a real environment, we call the f5_tts API
-        time.sleep(0.5)
-        return 2.0
+        from pathlib import Path
+        ref_file = ref_wav or self.cfg.speaker_wav
+        if not ref_file or not Path(ref_file).exists():
+            raise FileNotFoundError(f"Reference WAV not found: {ref_file}")
+            
+        ref_text = self.model.transcribe(ref_file)
+        
+        self.model.infer(
+            ref_file=ref_file,
+            ref_text=ref_text,
+            gen_text=text,
+            speed=self.cfg.xtts_speed,
+            file_wave=output_path
+        )
+        
+        import torchaudio
+        info = torchaudio.info(output_path)
+        return info.num_frames / info.sample_rate
 
 # Registry pattern
 TTS_REGISTRY: Dict[str, Type[BaseTTS]] = {
@@ -148,17 +166,55 @@ def synthesize_segments(segments: List[Segment], cfg: PipelineConfig, out_dir: P
             continue
 
         # Retry logic & timeout watchdog
-        success = False
-        retries = 2
-        for attempt in range(retries):
+        # Attempt 1: Standard synthesis
+        try:
+            _ = provider.synthesize(text, out_wav, speaker_wav)
+            seg.tts_wav = out_wav
+            success = True
+        except Exception as e:
+            log.warning(f"Attempt 1 failed for segment {seg.id} with provider {provider.name}: {e}. Trying Attempt 2 (text splitting) …")
+            
+        # Attempt 2: Split text into smaller sentences and merge
+        if not success:
             try:
-                _ = provider.synthesize(text, out_wav, speaker_wav)
-                seg.tts_wav = out_wav
-                success = True
-                break
+                import re
+                from pydub import AudioSegment
+                sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+                if len(sentences) > 1:
+                    log.info(f"Splitting segment {seg.id} into {len(sentences)} sub-sentences for retry …")
+                    sub_wavs = []
+                    for idx, sent in enumerate(sentences):
+                        sub_out_wav = str(tts_dir / f"seg_{seg.id}_sub_{idx}.wav")
+                        provider.synthesize(sent, sub_out_wav, speaker_wav)
+                        sub_wavs.append(sub_out_wav)
+                    
+                    # Merge audio
+                    combined = AudioSegment.empty()
+                    for sw in sub_wavs:
+                        combined += AudioSegment.from_wav(sw)
+                    combined.export(out_wav, format="wav")
+                    seg.tts_wav = out_wav
+                    success = True
+                    log.info(f"Successfully synthesized and merged sub-sentences for segment {seg.id}")
+                else:
+                    log.warning(f"Text too short to split for segment {seg.id}. Skipping Attempt 2.")
             except Exception as e:
-                log.warning(f"Attempt {attempt + 1} failed for segment {seg.id}: {e}")
-                time.sleep(1.0)
+                log.warning(f"Attempt 2 (split and merge) failed for segment {seg.id}: {e}")
+                
+        # Attempt 3: Fallback to KokoroProvider
+        if not success and provider.name != "kokoro":
+            log.warning(f"Attempt 2 failed. Falling back to Kokoro for segment {seg.id} …")
+            try:
+                kokoro_provider = KokoroProvider(cfg)
+                if kokoro_provider.available:
+                    kokoro_provider.synthesize(text, out_wav, speaker_wav)
+                    seg.tts_wav = out_wav
+                    success = True
+                    log.info(f"Successfully synthesized segment {seg.id} using Kokoro fallback")
+                else:
+                    log.error("Kokoro provider is not available for fallback.")
+            except Exception as e:
+                log.error(f"Kokoro fallback failed for segment {seg.id}: {e}")
                 
         if not success:
             log.error(f"Segment {seg.id} TTS failed after all attempts.")

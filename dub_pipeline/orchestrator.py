@@ -1,7 +1,8 @@
 import json
 import logging
+import torch
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List
 from .config import PipelineConfig, Segment
 from .audio import check_ffmpeg, extract_audio, extract_full_audio, assemble_dubbed_track, mix_with_bgm, mux_to_video
 from .transcribe import transcribe
@@ -100,6 +101,15 @@ def process_file(input_path: Path, output_path: Optional[Path], cfg: PipelineCon
             log.info(f"Restored {len(segments)} segments from artifact '{art_name}'")
             break
 
+    import time
+    metrics = {
+        "stt_seconds": 0.0,
+        "translation_seconds": 0.0,
+        "tts_seconds": 0.0,
+        "alignment_seconds": 0.0,
+        "peak_vram_mb": 0.0
+    }
+
     # ── Stage 1: Extract Audio ──────────────────────────────────────────
     if current_stage == "extract" or not wav_16k.exists():
         log.info("[1/8] Extracting audio tracks …")
@@ -125,7 +135,9 @@ def process_file(input_path: Path, output_path: Optional[Path], cfg: PipelineCon
     # ── Stage 2: Transcribe ─────────────────────────────────────────────
     if current_stage == "transcribe":
         log.info("[2/8] Running speech transcription …")
+        start_t = time.time()
         segments = transcribe(wav_16k, cfg)
+        metrics["stt_seconds"] = time.time() - start_t
         save_artifact("transcript", segments, work_dir)
         current_stage = "segment"
         mm.save(current_stage, "completed")
@@ -145,7 +157,9 @@ def process_file(input_path: Path, output_path: Optional[Path], cfg: PipelineCon
         log.info("[4/8] Running translation (RU → EN) …")
         if not segments:
             segments = load_artifact("segmented", work_dir) or []
-        segments = translate_segments(segments, cfg)
+        start_t = time.time()
+        segments = translate_segments(segments, cfg, work_dir=work_dir)
+        metrics["translation_seconds"] = time.time() - start_t
         save_artifact("translated", segments, work_dir)
         current_stage = "refine"
         mm.save(current_stage, "completed")
@@ -155,7 +169,6 @@ def process_file(input_path: Path, output_path: Optional[Path], cfg: PipelineCon
         log.info("[5/8] Running translation refinement (pass-through for now) …")
         if not segments:
             segments = load_artifact("translated", work_dir) or []
-        # Pass-through in Phase 1
         for s in segments:
             if not s.text_refined:
                 s.text_refined = s.text_en
@@ -169,16 +182,14 @@ def process_file(input_path: Path, output_path: Optional[Path], cfg: PipelineCon
         if not segments:
             segments = load_artifact("refined", work_dir) or []
         
-        # We wrapper synthesize_segments to use refined text or en text
-        # If refined is empty, fallback to en
         for s in segments:
             if not s.text_refined:
                 s.text_refined = s.text_en
                 
-        # Handle segment-level progress during synthesis
+        start_t = time.time()
         segments = synthesize_segments(segments, cfg, work_dir)
+        metrics["tts_seconds"] = time.time() - start_t
         
-        # Find last successful segment index
         last_idx = 0
         last_id = ""
         for idx, s in enumerate(segments):
@@ -195,7 +206,9 @@ def process_file(input_path: Path, output_path: Optional[Path], cfg: PipelineCon
         log.info("[7/8] Assembling dubbed audio track …")
         if not segments:
             segments = load_artifact("refined", work_dir) or []
+        start_t = time.time()
         dubbed_track = assemble_dubbed_track(segments, wav_16k, work_dir, cfg)
+        metrics["alignment_seconds"] = time.time() - start_t
         if cfg.keep_bgm:
             final_audio = mix_with_bgm(dubbed_track, wav_full, segments, work_dir, cfg)
         else:
@@ -215,7 +228,25 @@ def process_file(input_path: Path, output_path: Optional[Path], cfg: PipelineCon
         
         mux_to_video(input_path, final_audio, output_path)
         current_stage = "done"
-        mm.save(current_stage, "completed")
+        
+        # Track Peak VRAM
+        if torch.cuda.is_available():
+            metrics["peak_vram_mb"] = torch.cuda.max_memory_allocated() / (1024 ** 2)
+            
+        mm.save(current_stage, "completed", metrics=metrics)
+
+    # Clean up temporary/sub-sentence audio files
+    try:
+        log.info("Performing post-run temporary file cleanup …")
+        tts_dir = work_dir / "tts_segments"
+        if tts_dir.exists():
+            for sub_file in tts_dir.glob("seg_*_sub_*.wav"):
+                sub_file.unlink()
+        raw_track = work_dir / "dubbed_track_raw.wav"
+        if raw_track.exists():
+            raw_track.unlink()
+    except Exception as e:
+        log.warning(f"Post-run cleanup failed: {e}")
 
     log.info(f" Dubbing complete! Saved output to {output_path}")
     return output_path

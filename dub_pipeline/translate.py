@@ -5,14 +5,14 @@ import os
 import json
 import hashlib
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from datetime import datetime
 import torch
 from .config import PipelineConfig, Segment
 
 log = logging.getLogger("dub_pipeline.translate")
 
-CACHE_FILE = Path("translation_cache.json")
+CACHE_FILE = Path("artifacts/translation_cache.json")
 
 TERMINOLOGY_ENFORCEMENTS = {
     r"\b(traversal object|pointer traversal)\b": "iterator",
@@ -37,6 +37,7 @@ def load_cache() -> dict:
 
 def save_cache(cache: dict):
     try:
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:
         log.warning(f"Failed to save translation cache: {e}")
@@ -70,7 +71,7 @@ def apply_terminology_dictionary(text: str) -> str:
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
     return text
 
-def translate_segments(segments: List[Segment], cfg: PipelineConfig) -> List[Segment]:
+def translate_segments(segments: List[Segment], cfg: PipelineConfig, work_dir: Optional[Path] = None) -> List[Segment]:
     log.info(f"Translating {len(segments)} segments (RU→EN) …")
     cache = load_cache()
     
@@ -85,66 +86,157 @@ def translate_segments(segments: List[Segment], cfg: PipelineConfig) -> List[Seg
         else:
             needed_segments.append((seg, h))
             
-    # 2. Translate Needed Segments using Fallback Hierarchy
+    # 2. Translate Needed Segments using Fallback Hierarchy with Provider Stickiness
     if needed_segments:
-        # Try Google Translate first
-        google_success = False
-        try:
-            from deep_translator import GoogleTranslator
-            translator = GoogleTranslator(source="ru", target="en")
-            log.info(f"Translating {len(needed_segments)} new segments via Google Translate …")
-            for seg, h in needed_segments:
-                translation = translator.translate(seg.text_ru)
-                seg.text_en = translation.strip()
-                # Update Cache
-                cache[h] = {
-                    "source": seg.text_ru,
-                    "provider": "google",
-                    "translated_text": seg.text_en,
-                    "created_at": datetime.utcnow().isoformat() + "Z",
-                    "refined": False
-                }
-            google_success = True
-        except Exception as e:
-            log.warning(f"Google Translate failed: {e}. Falling back to MarianMT …")
+        import time
+        import random
+        
+        # Determine initial provider based on config
+        backend = getattr(cfg, "translation_backend", "marian")
+        if backend == "deep_translator":
+            current_provider = "google"
+        elif backend == "qwen":
+            current_provider = "qwen"
+        elif backend == "translategemma":
+            current_provider = "translategemma"
+        else:
+            current_provider = "marian"
+
+        google_failures = 0
+        qwen_translator = None
+        gemma_translator = None
+        
+        log.info(f"Translating {len(needed_segments)} new segments (starting provider: {current_provider}) …")
+        
+        for idx, (seg, h) in enumerate(needed_segments):
+            translated_text = ""
+            success = False
             
-        if not google_success:
-            # Fallback to local MarianMT
-            _translate_marian([pair[0] for pair in needed_segments], cfg)
-            # Update cache for MarianMT translations
-            for seg, h in needed_segments:
-                cache[h] = {
-                    "source": seg.text_ru,
-                    "provider": "marian",
-                    "translated_text": seg.text_en,
-                    "created_at": datetime.utcnow().isoformat() + "Z",
-                    "refined": False
-                }
+            # --- Try TranslateGemma ---
+            if current_provider == "translategemma":
+                try:
+                    if gemma_translator is None:
+                        from .translategemma_fallback import TranslateGemmaTranslator
+                        gemma_translator = TranslateGemmaTranslator(cfg.translategemma_model_path, device=cfg.device)
+                    translated_text = gemma_translator.translate(seg.text_ru).strip()
+                    success = True
+                except Exception as e:
+                    log.warning(f"TranslateGemma translation failed on segment {seg.id}: {e}. Falling back permanently to Qwen.")
+                    current_provider = "qwen"
+
+            # --- Try Google ---
+            if not success and current_provider == "google":
+                try:
+                    from deep_translator import GoogleTranslator
+                    translator = GoogleTranslator(source="ru", target="en")
+                    translated_text = translator.translate(seg.text_ru).strip()
+                    success = True
+                    # Rate limiting protection sleep
+                    time.sleep(random.uniform(0.05, 0.15))
+                except Exception as e:
+                    google_failures += 1
+                    log.warning(f"Google Translate failed ({google_failures}/3) on segment {seg.id}: {e}")
+                    if google_failures >= 3:
+                        log.warning("Google Translate failed 3 times consecutively. Switching provider permanently to Qwen fallback for this run.")
+                        current_provider = "qwen"
+            
+            # --- Try Qwen Fallback ---
+            if not success and current_provider == "qwen":
+                try:
+                    if qwen_translator is None:
+                        from .qwen_fallback import QwenFallbackTranslator
+                        qwen_translator = QwenFallbackTranslator(cfg.qwen_model_path, device=cfg.device)
+                    translated_text = qwen_translator.translate(seg.text_ru).strip()
+                    success = True
+                except Exception as e:
+                    log.warning(f"Qwen fallback translation failed on segment {seg.id}: {e}. Switching permanently to MarianMT disaster recovery.")
+                    current_provider = "marian"
+                    
+            # --- Try MarianMT Disaster Recovery ---
+            if not success and current_provider == "marian":
+                try:
+                    _translate_marian([seg], cfg)
+                    translated_text = seg.text_en
+                    success = True
+                except Exception as e:
+                    log.error(f"Catastrophic failure: MarianMT failed on segment {seg.id}: {e}")
+                    translated_text = seg.text_ru  # Fallback to original text if everything fails
+                    success = True
+            
+            seg.text_en = translated_text
+            
+            # Update cache and save periodically
+            cache[h] = {
+                "source": seg.text_ru,
+                "provider": current_provider,
+                "translated_text": seg.text_en,
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "refined": False
+            }
+            
+            if idx % 10 == 0 or idx == len(needed_segments) - 1:
+                save_cache(cache)
+                log.info(f"   … translated {idx}/{len(needed_segments)} segments (current provider: {current_provider})")
                 
-        save_cache(cache)
+        if qwen_translator is not None:
+            qwen_translator.unload()
+        if gemma_translator is not None:
+            gemma_translator.unload()
 
     # 3. Post-process terminology
     for seg in segments:
         seg.text_en = apply_terminology_dictionary(seg.text_en)
 
-    # 4. Selective Refinement (Gemini Flash / OpenAI / Mock Refiner)
-    refine_segments_if_needed(segments)
+    # 4. Selective Refinement (Gemini Flash with Qwen local fallback)
+    refine_segments_if_needed(segments, cfg)
+
+    # 5. Log translation metrics
+    if work_dir:
+        try:
+            metrics_file = work_dir / "artifacts" / "metrics.json"
+            google_count = 0
+            qwen_count = 0
+            marian_count = 0
+            for seg in segments:
+                h = get_normalized_hash(seg.text_ru)
+                entry = cache.get(h, {})
+                prov = entry.get("provider", "marian")
+                if prov == "google":
+                    google_count += 1
+                elif prov == "qwen":
+                    qwen_count += 1
+                else:
+                    marian_count += 1
+            
+            metrics = {}
+            if metrics_file.exists():
+                try:
+                    metrics = json.loads(metrics_file.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            metrics["translation_provider_used"] = {
+                "google": google_count,
+                "qwen": qwen_count,
+                "marian": marian_count
+            }
+            metrics_file.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            log.warning(f"Failed to save translation metrics: {e}")
 
     return segments
 
-def refine_segments_if_needed(segments: List[Segment]):
+def refine_segments_if_needed(segments: List[Segment], cfg: PipelineConfig):
     api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        log.info("No GEMINI_API_KEY found. Skipping timing-based refinement step.")
-        for seg in segments:
-            seg.text_refined = seg.text_en
-        return
-
+    qwen_translator = None
+    gemma_translator = None
+    
     import urllib.request
     import json
 
-    log.info("Running selective timing-based refinement via Gemini API …")
+    log.info("Running selective timing-based refinement …")
     for i, seg in enumerate(segments):
+        if i % 100 == 0 or i == len(segments) - 1:
+            log.info(f"   … checked/refined {i}/{len(segments)} segments")
         original_duration = seg.end - seg.start
         predicted_duration = estimate_spoken_duration(seg.text_en)
         
@@ -152,40 +244,76 @@ def refine_segments_if_needed(segments: List[Segment]):
         if predicted_duration > (original_duration * 1.2):
             log.info(f"Segment {seg.id} exceeds budget (estimated {predicted_duration:.2f}s vs original {original_duration:.2f}s). Refining …")
             
-            prompt = (
-                f"You are a professional educational localization refiner.\n"
-                f"Rewrite this translated English C++ lecture segment to be more concise and shorter so it fits in a {original_duration:.2f} second speaking window.\n"
-                f"Original Russian: {seg.text_ru}\n"
-                f"Literal English: {seg.text_en}\n"
-                f"Constraints:\n"
-                f"- Do not alter code/technical semantics.\n"
-                f"- Preserve terminology: iterator, template, pointer, std::vector.\n"
-                f"- Output ONLY the refined English text with no quotes, commentary, or explanation."
-            )
-            
-            try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-                req_data = {
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.1}
-                }
-                req = urllib.request.Request(
-                    url,
-                    data=json.dumps(req_data).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    method="POST"
+            gemini_success = False
+            if api_key:
+                prompt = (
+                    f"You are a professional educational localization refiner.\n"
+                    f"Rewrite this translated English C++ lecture segment to be more concise and shorter so it fits in a {original_duration:.2f} second speaking window.\n"
+                    f"Original Russian: {seg.text_ru}\n"
+                    f"Literal English: {seg.text_en}\n"
+                    f"Constraints:\n"
+                    f"- Do not alter code/technical semantics.\n"
+                    f"- Preserve terminology: iterator, template, pointer, std::vector.\n"
+                    f"- Output ONLY the refined English text with no quotes, commentary, or explanation."
                 )
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    res = json.loads(response.read().decode("utf-8"))
-                    refined_text = res["candidates"][0]["content"]["parts"][0]["text"].strip()
+                
+                try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+                    req_data = {
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {"temperature": 0.1}
+                    }
+                    req = urllib.request.Request(
+                        url,
+                        data=json.dumps(req_data).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req, timeout=10) as response:
+                        res = json.loads(response.read().decode("utf-8"))
+                        refined_text = res["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        if refined_text:
+                            seg.text_refined = refined_text
+                            log.info(f"   Refined (Gemini) {seg.id}: '{seg.text_en}' -> '{seg.text_refined}'")
+                            gemini_success = True
+                            continue
+                except Exception as ex:
+                    log.warning(f"Refinement Gemini API error on segment {seg.id}: {ex}")
+
+            if not gemini_success:
+                if getattr(cfg, "translation_backend", "") == "translategemma":
+                    log.info("Trying TranslateGemma local fallback for timing-aware refinement …")
+                    try:
+                        if gemma_translator is None:
+                            from .translategemma_fallback import TranslateGemmaTranslator
+                            gemma_translator = TranslateGemmaTranslator(cfg.translategemma_model_path, device=cfg.device)
+                        refined_text = gemma_translator.rewrite_for_timing(seg.text_en, original_duration)
+                        if refined_text:
+                            seg.text_refined = refined_text
+                            log.info(f"   Refined (TranslateGemma) {seg.id}: '{seg.text_en}' -> '{seg.text_refined}'")
+                            continue
+                    except Exception as ex:
+                        log.warning(f"TranslateGemma local refinement failed on segment {seg.id}: {ex}")
+
+                log.info("Trying Qwen local fallback for timing-aware refinement …")
+                try:
+                    if qwen_translator is None:
+                        from .qwen_fallback import QwenFallbackTranslator
+                        qwen_translator = QwenFallbackTranslator(cfg.qwen_model_path, device=cfg.device)
+                    refined_text = qwen_translator.rewrite_for_timing(seg.text_en, original_duration)
                     if refined_text:
                         seg.text_refined = refined_text
-                        log.info(f"   Refined {seg.id}: '{seg.text_en}' -> '{seg.text_refined}'")
+                        log.info(f"   Refined (Qwen) {seg.id}: '{seg.text_en}' -> '{seg.text_refined}'")
                         continue
-            except Exception as ex:
-                log.warning(f"Refinement API error on segment {seg.id}: {ex}")
+                except Exception as ex:
+                    log.warning(f"Qwen local refinement failed on segment {seg.id}: {ex}")
                 
         seg.text_refined = seg.text_en
+
+    if qwen_translator is not None:
+        qwen_translator.unload()
+    if gemma_translator is not None:
+        gemma_translator.unload()
 
 def _translate_marian(segments: List[Segment], cfg: PipelineConfig):
     try:
