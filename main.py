@@ -42,7 +42,7 @@ def main():
     parser.add_argument("--profile", choices=["fast", "high_quality", "educational", "authentic"], default="fast", help="Settings profile")
     parser.add_argument("--tts_provider", choices=["xtts", "kokoro", "f5"], default=None, help="TTS synthesis engine")
     parser.add_argument("--qwen_path", type=str, default="models/qwen/Qwen2.5-3B-Instruct-Q4_K_M.gguf", help="Path to local Qwen GGUF model")
-    parser.add_argument("--translategemma_path", type=str, default="models/translategemma/translategemma-4b-it.Q4_K_M.gguf", help="Path to local TranslateGemma GGUF model")
+    parser.add_argument("--translategemma_path", type=str, default="models/translategemma/google.translategemma-4b-it.Q4_K_M.gguf", help="Path to local TranslateGemma GGUF model")
 
     args = parser.parse_args()
 

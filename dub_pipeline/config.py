@@ -74,7 +74,7 @@ class PipelineConfig:
     # Profile & Fallbacks
     profile: str = "fast"  # fast, high_quality, educational, authentic
     qwen_model_path: str = "models/qwen/Qwen2.5-3B-Instruct-Q4_K_M.gguf"
-    translategemma_model_path: str = "models/translategemma/translategemma-4b-it.Q4_K_M.gguf"
+    translategemma_model_path: str = "models/translategemma/google.translategemma-4b-it.Q4_K_M.gguf"
 
     # Misc
     device: str = field(init=False)

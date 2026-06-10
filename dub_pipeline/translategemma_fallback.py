@@ -8,8 +8,8 @@ log = logging.getLogger("dub_pipeline.translategemma_fallback")
 def download_translategemma(path: Path):
     import urllib.request
     path.parent.mkdir(parents=True, exist_ok=True)
-    url = "https://huggingface.co/mradermacher/translategemma-4b-it-GGUF/resolve/main/translategemma-4b-it.Q4_K_M.gguf"
-    log.info(f"Downloading TranslateGemma model from {url} to {path} ... This may take a few minutes (approx. 2.7 GB).")
+    url = "https://huggingface.co/DevQuasar/google.translategemma-4b-it-GGUF/resolve/main/google.translategemma-4b-it.Q4_K_M.gguf"
+    log.info(f"Downloading TranslateGemma model from {url} to {path} ... This may take a few minutes (approx. 2.5 GB).")
     try:
         def reporthook(blocknum, blocksize, totalsize):
             readsofar = blocknum * blocksize
@@ -45,7 +45,7 @@ class TranslateGemmaTranslator:
         path = Path(self.model_path)
         if not path.exists():
             print(f"\n[WARNING] Local TranslateGemma model not found at: {path.absolute()}")
-            choice = input("Would you like to download translategemma-4b-it.Q4_K_M.gguf (approx. 2.7 GB) from Hugging Face now? [y/N]: ").strip().lower()
+            choice = input("Would you like to download google.translategemma-4b-it.Q4_K_M.gguf (approx. 2.5 GB) from Hugging Face now? [y/N]: ").strip().lower()
             if choice == 'y':
                 download_translategemma(path)
             else:
