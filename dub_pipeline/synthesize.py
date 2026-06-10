@@ -71,7 +71,7 @@ class KokoroProvider(BaseTTS):
             raise RuntimeError("Kokoro provider is not available.")
         import soundfile as sf
         import numpy as np
-        generator = self.pipeline(text, voice="af_sky", speed=self.cfg.tts_speed, split_pattern=None)
+        generator = self.pipeline(text, voice="af_bella", speed=self.cfg.tts_speed, split_pattern=None)
         audio_segments = []
         for gs, ps, audio in generator:
             if audio is not None and len(audio) > 0:

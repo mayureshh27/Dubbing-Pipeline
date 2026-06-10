@@ -105,6 +105,7 @@ def translate_segments(segments: List[Segment], cfg: PipelineConfig, work_dir: O
         google_failures = 0
         qwen_translator = None
         gemma_translator = None
+        marian_translator = None
         
         log.info(f"Translating {len(needed_segments)} new segments (starting provider: {current_provider}) …")
         
@@ -155,8 +156,9 @@ def translate_segments(segments: List[Segment], cfg: PipelineConfig, work_dir: O
             # --- Try MarianMT Disaster Recovery ---
             if not success and current_provider == "marian":
                 try:
-                    _translate_marian([seg], cfg)
-                    translated_text = seg.text_en
+                    if marian_translator is None:
+                        marian_translator = MarianFallbackTranslator(cfg.marian_model)
+                    translated_text = marian_translator.translate(seg.text_ru)
                     success = True
                 except Exception as e:
                     log.error(f"Catastrophic failure: MarianMT failed on segment {seg.id}: {e}")
@@ -182,6 +184,8 @@ def translate_segments(segments: List[Segment], cfg: PipelineConfig, work_dir: O
             qwen_translator.unload()
         if gemma_translator is not None:
             gemma_translator.unload()
+        if marian_translator is not None:
+            marian_translator.unload()
 
     # 3. Post-process terminology
     for seg in segments:
@@ -314,6 +318,42 @@ def refine_segments_if_needed(segments: List[Segment], cfg: PipelineConfig):
         qwen_translator.unload()
     if gemma_translator is not None:
         gemma_translator.unload()
+
+class MarianFallbackTranslator:
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+        self.tokenizer = None
+        self.model = None
+
+    def load(self):
+        if self.model is not None:
+            return
+        try:
+            from transformers import MarianMTModel, MarianTokenizer
+        except ImportError:
+            raise ImportError("Run: pip install transformers sentencepiece")
+        log.info(f"Loading {self.model_name} on CPU for memory safety …")
+        self.tokenizer = MarianTokenizer.from_pretrained(self.model_name)
+        self.model = MarianMTModel.from_pretrained(self.model_name).to("cpu")
+        self.model.eval()
+
+    def unload(self):
+        if self.model is not None:
+            log.info("Unloading Marian model …")
+            del self.model
+            del self.tokenizer
+            self.model = None
+            self.tokenizer = None
+            gc.collect()
+
+    def translate(self, text: str) -> str:
+        self.load()
+        import torch
+        tokens = self.tokenizer([text], return_tensors="pt", padding=True, truncation=True, max_length=512).to("cpu")
+        with torch.no_grad():
+            translated = self.model.generate(**tokens)
+        decoded = self.tokenizer.batch_decode(translated, skip_special_tokens=True)
+        return decoded[0].strip()
 
 def _translate_marian(segments: List[Segment], cfg: PipelineConfig):
     try:
